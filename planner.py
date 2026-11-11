@@ -50,7 +50,7 @@ def _doc_ref():
         if not uid:
             docs = list(_db.collection("users").limit(2).stream())
             if not docs:
-                raise RuntimeError("В планере ещё никто не входил: нет документов в users")
+                return None  # на сайте ещё никто не входил: дела видны только из index.html
             if len(docs) > 1:
                 log.warning("В users несколько документов, беру первый. Укажите PLANER_USER_ID в .env")
             uid = docs[0].id
@@ -83,12 +83,19 @@ async def _load_base() -> list[dict]:
 
 
 async def _read_kv() -> dict:
-    snap = await asyncio.to_thread(_doc_ref().get)
+    ref = await asyncio.to_thread(_doc_ref)
+    if ref is None:
+        return {}
+    snap = await asyncio.to_thread(ref.get)
     return (snap.to_dict() or {}).get("kv", {}) if snap.exists else {}
 
 
 async def _write_kv(kv: dict) -> None:
-    await asyncio.to_thread(_doc_ref().set, {"kv": kv, "updatedAt": int(time.time() * 1000)}, merge=True)
+    ref = await asyncio.to_thread(_doc_ref)
+    if ref is None:
+        raise RuntimeError("Владелец ещё не входил в планер на сайте через Google, сохранить изменения некуда. "
+                           "Попроси его открыть ialexrd.github.io/planer и войти.")
+    await asyncio.to_thread(ref.set, {"kv": kv, "updatedAt": int(time.time() * 1000)}, merge=True)
 
 
 def _json(kv: dict, key: str, default):
