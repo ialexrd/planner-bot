@@ -24,6 +24,7 @@ from zoneinfo import ZoneInfo
 from dotenv import load_dotenv
 
 import planner
+import web
 import yandex
 
 BASE = Path(__file__).parent
@@ -97,7 +98,10 @@ def today() -> dt.date:
 def system_prompt(tools: bool = False) -> str:
     now = dt.datetime.now(ZoneInfo(TZ))
     head = f"Сейчас {now:%Y-%m-%d %H:%M}, {WEEKDAYS[now.weekday()]}.\n\n"
-    return head + SYSTEM + read_text("context.md") + (planner.PROMPT if tools else "")
+    extra = ""
+    if tools:
+        extra = web.PROMPT + (planner.PROMPT if planner.enabled() else "")
+    return head + SYSTEM + read_text("context.md") + extra
 
 
 async def _complete(client: httpx.AsyncClient, messages: list[dict], temperature: float, tools: list | None):
@@ -111,12 +115,12 @@ async def _complete(client: httpx.AsyncClient, messages: list[dict], temperature
 
 
 async def ask(messages: list[dict], temperature: float = 0.8, tools: bool = False) -> str:
-    """Запрос к DeepSeek. С tools=True модель может работать с планером (до 8 шагов)."""
-    use_tools = tools and planner.enabled()
-    msgs = [{"role": "system", "content": system_prompt(use_tools)}, *messages]
+    """Запрос к DeepSeek. С tools=True модель может искать в интернете и работать с планером (до 8 шагов)."""
+    tool_list = (web.tools() + (planner.TOOLS if planner.enabled() else [])) if tools else []
+    msgs = [{"role": "system", "content": system_prompt(bool(tool_list))}, *messages]
     async with httpx.AsyncClient(timeout=120) as client:
         for _ in range(8):
-            msg = await _complete(client, msgs, temperature, planner.TOOLS if use_tools else None)
+            msg = await _complete(client, msgs, temperature, tool_list or None)
             calls = msg.get("tool_calls") or []
             if not calls:
                 return (msg.get("content") or "").strip()
@@ -124,7 +128,10 @@ async def ask(messages: list[dict], temperature: float = 0.8, tools: bool = Fals
             for c in calls:
                 try:
                     args = json.loads(c["function"].get("arguments") or "{}")
-                    result = await planner.call_tool(c["function"]["name"], args)
+                    name = c["function"]["name"]
+                    result = await web.call_tool(name, args)
+                    if result is None:
+                        result = await planner.call_tool(name, args)
                 except Exception as ex:  # ошибка инструмента уходит модели, пусть объяснит
                     log.exception("Инструмент %s упал", c["function"]["name"])
                     result = {"error": str(ex)}
