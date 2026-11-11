@@ -9,7 +9,6 @@
 """
 import asyncio
 import contextlib
-import datetime as dt
 import json
 import logging
 import os
@@ -20,10 +19,8 @@ from aiogram import Bot, Dispatcher, F
 from aiogram.filters import Command
 from aiogram.types import Message
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
-from zoneinfo import ZoneInfo
 from dotenv import load_dotenv
 
-import planner
 import yandex
 
 BASE = Path(__file__).parent
@@ -87,61 +84,24 @@ def books() -> list[str]:
     return [l.strip() for l in read_text("books.txt").splitlines() if l.strip() and not l.startswith("#")]
 
 
-WEEKDAYS = ["понедельник", "вторник", "среда", "четверг", "пятница", "суббота", "воскресенье"]
+def system_prompt() -> str:
+    return SYSTEM + read_text("context.md")
 
 
-def today() -> dt.date:
-    return dt.datetime.now(ZoneInfo(TZ)).date()
-
-
-def system_prompt(tools: bool = False) -> str:
-    now = dt.datetime.now(ZoneInfo(TZ))
-    head = f"Сейчас {now:%Y-%m-%d %H:%M}, {WEEKDAYS[now.weekday()]}.\n\n"
-    return head + SYSTEM + read_text("context.md") + (planner.PROMPT if tools else "")
-
-
-async def _complete(client: httpx.AsyncClient, messages: list[dict], temperature: float, tools: list | None):
-    body = {"model": MODEL, "messages": messages, "temperature": temperature, "max_tokens": 900}
-    if tools:
-        body["tools"] = tools
-    r = await client.post(f"{DEEPSEEK_URL}/chat/completions",
-                          headers={"Authorization": f"Bearer {DEEPSEEK_KEY}"}, json=body)
-    r.raise_for_status()
-    return r.json()["choices"][0]["message"]
-
-
-async def ask(messages: list[dict], temperature: float = 0.8, tools: bool = False) -> str:
-    """Запрос к DeepSeek. С tools=True модель может работать с планером (до 8 шагов)."""
-    use_tools = tools and planner.enabled()
-    msgs = [{"role": "system", "content": system_prompt(use_tools)}, *messages]
+async def ask(messages: list[dict], temperature: float = 0.8) -> str:
     async with httpx.AsyncClient(timeout=120) as client:
-        for _ in range(8):
-            msg = await _complete(client, msgs, temperature, planner.TOOLS if use_tools else None)
-            calls = msg.get("tool_calls") or []
-            if not calls:
-                return (msg.get("content") or "").strip()
-            msgs.append({"role": "assistant", "content": msg.get("content") or "", "tool_calls": calls})
-            for c in calls:
-                try:
-                    args = json.loads(c["function"].get("arguments") or "{}")
-                    result = await planner.call_tool(c["function"]["name"], args)
-                except Exception as ex:  # ошибка инструмента уходит модели, пусть объяснит
-                    log.exception("Инструмент %s упал", c["function"]["name"])
-                    result = {"error": str(ex)}
-                msgs.append({"role": "tool", "tool_call_id": c["id"],
-                             "content": json.dumps(result, ensure_ascii=False)})
-        return "Не успел закончить: слишком много шагов. Уточните, пожалуйста, задачу."
-
-
-async def plan_today() -> list[dict]:
-    if not planner.enabled():
-        return []
-    try:
-        d = today().isoformat()
-        return await planner.tasks_between(d, d)
-    except Exception:
-        log.exception("Не удалось прочитать планер")
-        return []
+        r = await client.post(
+            f"{DEEPSEEK_URL}/chat/completions",
+            headers={"Authorization": f"Bearer {DEEPSEEK_KEY}"},
+            json={
+                "model": MODEL,
+                "messages": [{"role": "system", "content": system_prompt()}, *messages],
+                "temperature": temperature,
+                "max_tokens": 900,
+            },
+        )
+        r.raise_for_status()
+        return r.json()["choices"][0]["message"]["content"].strip()
 
 
 @contextlib.asynccontextmanager
@@ -188,21 +148,13 @@ async def morning_text() -> str:
             state["used_ideas"].append(f"{book}: {idea}")
             state["used_ideas"] = state["used_ideas"][-100:]
             save_state(state)
-    plan = await plan_today()
-    tail = f"\n\n🗓 *План на сегодня*\n{planner.format_day(plan)}" if plan else ""
-    return f"☀️ *Доброе утро*\n_{book}_\n\n{text}{tail}"
+    return f"☀️ *Доброе утро*\n_{book}_\n\n{text}"
 
 
 async def evening_text() -> str:
     state = load_state()
     last = state["used_ideas"][-1] if state["used_ideas"] else "идея дня"
     neck = f"3) напомни, что в {NECK} ОФП шеи 15 минут." if NECK else ""
-    plan = await plan_today()
-    undone = [t["title"] for t in plan if not t["done"]]
-    if plan:
-        neck += (f" 4) Из планера сегодня не отмечены: {'; '.join(undone)}. Мягко спроси, что успел, "
-                 "и предложи перенести остальное на завтра (я могу ответить, и ты перенесёшь)." if undone
-                 else " 4) Все дела дня в планере отмечены, коротко похвали.")
     text = await ask([{
         "role": "user",
         "content": (
@@ -289,7 +241,7 @@ async def handle_text(msg: Message, bot: Bot, text: str):
     history.append({"role": "user", "content": text})
 
     async def make():
-        answer = await ask(history, temperature=0.6, tools=True)
+        answer = await ask(history, temperature=0.6)
         async with state_lock:
             state = load_state()
             state["history"] = (history + [{"role": "assistant", "content": answer}])[-HISTORY_LIMIT:]
