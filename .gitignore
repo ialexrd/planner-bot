@@ -6,3 +6,5 @@ __pycache__/
 # личное: живёт только на сервере
 context.md
 books.txt
+planer-key.json
+*-key.json
