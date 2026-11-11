@@ -1,0 +1,12 @@
+[Unit]
+Description=Planner bot (personal assistant)
+After=network-online.target
+
+[Service]
+WorkingDirectory=/opt/planner-bot
+ExecStart=/opt/planner-bot/.venv/bin/python bot.py
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

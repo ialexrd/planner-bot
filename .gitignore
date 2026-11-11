@@ -1,0 +1,8 @@
+.env
+.venv/
+data/
+__pycache__/
+*.pyc
+# личное: живёт только на сервере
+context.md
+books.txt
